@@ -92,11 +92,8 @@ void loop() {
        // set the AC_status to on
        if ((roomTempF > (TARGET_TEMP+0.5)) && (AC_status == 0))
            {
-             toggle_AC();
-             if (get_status() == 1 )
-                 AC_status = 1;
-             else
-                 AC_status = 0;
+             toggle_AC();          
+             AC_status = 1;            
            }
 
        // deactivate the AC control by sending the IR codes, set the AC_status variable to off

@@ -13,6 +13,14 @@
 OneWire  ds(5);               // One Wire on pin 5
 #define ledPin 8              // heartbeat LED
 #define TARGET_TEMP 80        // temperature setpoint
+
+// the following defines are the state machine
+#define IDLE 0
+#define REQ 1
+#define WAIT 2
+#define RXSER 3
+
+
 int buttonPin = 7;            // pushbutton connected to digital #3
 int pwmPin = 3;
 int statusPin = 9;            // AC status led (indicates AC on or off)
@@ -35,8 +43,14 @@ unsigned int rawCodes[RAWBUF] = {4700, 4200, 800, 1400, 800, 300, 800, 350, 750,
 int codeLen = 43; // The length of the code
 
 long  previousMillis;
+typedef struct {
+  uint8_t state;		  // the state of the verify
 
+  long reqMillis;                 // time the status request went out
+  long newMillis;               // current time
+} _vfy;
 
+_vfy verify;                  // make the verify structure a global instance
 
 void setup() {
 
@@ -62,6 +76,7 @@ void loop() {
         uint8_t i;
           wdt_reset();
          unsigned long currentMillis = millis();
+         unsigned long newMillis;
          //************************************
         // Periodically read the sensors
         if (currentMillis - previousMillis > 5000)
@@ -92,8 +107,11 @@ void loop() {
        // set the AC_status to on
        if ((roomTempF > (TARGET_TEMP+0.5)) && (AC_status == 0))
            {
-             toggle_AC();          
-             AC_status = 1;            
+             toggle_AC();
+
+             AC_status = 1;
+             verify.state = REQ;    // state machine setup for verification
+             
            }
 
        // deactivate the AC control by sending the IR codes, set the AC_status variable to off
@@ -101,6 +119,7 @@ void loop() {
            {
              toggle_AC();
              AC_status = 0;
+             verify.state = REQ;    // state machine setup for verification
 
            }
 
@@ -110,6 +129,63 @@ void loop() {
          else
              digitalWrite(statusPin, LOW);
 
+       // if verification is in progress, process the state
+       if (verify.state != IDLE)
+           {
+            switch (verify.state)
+              {
+              case REQ:
+                  delay (100);            // allow AC time to startup
+                  Serial.println("?8");
+                  verify.reqMillis = millis();    // get the time of the request
+                  verify.state = WAIT;
+                  break;
+              case WAIT:
+                  verify.newMillis = millis();
+                  if ((verify.newMillis - verify.reqMillis) > 200)
+                           verify.state = RXSER;
+                  break;
+              case RXSER:
+                  verify.newMillis = millis();
+                   if ((verify.newMillis - verify.reqMillis) > 2000)   // timeout if no response
+                                 {
+                                 verify.state = IDLE;  
+                                 soft_flush();
+                                 }
+                  if (Serial.available()>0)
+                     {
+                       char ch = Serial.read();                     // !
+                       if ((ch == '!') && (Serial.available()>0))
+                          {
+                          char ch2 = Serial.read();                  // 8
+                          char ch3 = Serial.read();                  // 0 or 1
+                          Serial.print("]");                         // verify back
+                          Serial.print(ch2);
+                          Serial.println(ch3);
+                          
+                          switch(ch3)
+                             {
+                             case '0':
+                               if (AC_status) AC_status = 0;
+                               break;
+                              case '1':
+                               if (!AC_status) AC_status = 1;
+                               break;
+                             }
+                              
+                            soft_flush();
+                            verify.state = IDLE;
+                          }
+                       else
+                          {
+                            soft_flush();
+                          }
+                  
+                  }
+               break;
+               }
+           }  // end verify state machine processor
+           
        if (! digitalRead(buttonPin)) {
            // pushbutton pressed
 
@@ -194,4 +270,17 @@ uint8_t get_status(void)
   delay(500);     // allow time for status return
 
   return retval;
+}
+
+// Even though the hardware was flushed, the software buffer seems to have chars in it
+// this sequence of reads empties the buffer
+void soft_flush(void)
+{
+   char chx;
+   while (Serial.available()>0)
+                     {
+                      chx = Serial.read();
+                      
+                     }
+            
 }

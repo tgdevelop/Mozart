@@ -16,9 +16,9 @@ OneWire  ds(5);               // One Wire on pin 5
 
 // the following defines are the state machine
 #define IDLE 0
-#define REQ 1
-#define WAIT 2
-#define RXSER 3
+#define REQ 5
+#define WAIT 6
+#define RXSER 7
 
 
 int buttonPin = 7;            // pushbutton connected to digital #3
@@ -45,7 +45,7 @@ int codeLen = 43; // The length of the code
 long  previousMillis;
 typedef struct {
   uint8_t state;		  // the state of the verify
-
+  uint8_t retry;                  // flag to turn retry on/off
   long reqMillis;                 // time the status request went out
   long newMillis;               // current time
 } _vfy;
@@ -107,20 +107,28 @@ void loop() {
        // set the AC_status to on
        if ((roomTempF > (TARGET_TEMP+0.5)) && (AC_status == 0))
            {
-             toggle_AC();
-
-             AC_status = 1;
-             verify.state = REQ;    // state machine setup for verification
-             
+             // toggle the AC if we're not waiting for a verify
+             if (verify.state == IDLE)
+                   {
+                   toggle_AC();
+                   verify.state = REQ;    // state machine setup for verification
+                   }
+             // AC_status = 1;
+            
+             wdt_reset();
            }
 
        // deactivate the AC control by sending the IR codes, set the AC_status variable to off
          if ((roomTempF < (TARGET_TEMP - 0.5)) && (AC_status == 1))
            {
-             toggle_AC();
-             AC_status = 0;
-             verify.state = REQ;    // state machine setup for verification
-
+             // toggle the AC if we're not waiting for a verify
+             if (verify.state == IDLE)
+                   {
+                   toggle_AC();
+                   // AC_status = 0;
+                   verify.state = REQ;    // state machine setup for verification
+                   }
+             wdt_reset();
            }
 
        // Set the status LED to indicate AC on or off
@@ -135,46 +143,56 @@ void loop() {
             switch (verify.state)
               {
               case REQ:
-                  delay (100);            // allow AC time to startup
-                  Serial.println("?8");
+                  if (!verify.retry)
+                       delay (500);            // allow AC time to startup or shutdown if first time through
+                  verify.retry = 0;
+                  Serial.println("?8");           // get power status
                   verify.reqMillis = millis();    // get the time of the request
                   verify.state = WAIT;
+                  wdt_reset();
                   break;
               case WAIT:
                   verify.newMillis = millis();
-                  if ((verify.newMillis - verify.reqMillis) > 200)
+                  wdt_reset();
+                  if ((verify.newMillis - verify.reqMillis) > 2000)    // wait 2 seconds for power up
                            verify.state = RXSER;
                   break;
               case RXSER:
+                  //Serial.print("RXSER");
                   verify.newMillis = millis();
-                   if ((verify.newMillis - verify.reqMillis) > 2000)   // timeout if no response
-                                 {
-                                 verify.state = IDLE;  
+                  wdt_reset();
+                   if ((verify.newMillis - verify.reqMillis) > 5000)   // timeout if no response
+                                 {                                 
+                                 verify.state = REQ;                   // retry until response
+                                 verify.retry = 1;                     // with no power on/off delay
                                  soft_flush();
                                  }
                   if (Serial.available()>0)
                      {
                        char ch = Serial.read();                     // !
+                       delay(100);
+                       //Serial.print(ch);
                        if ((ch == '!') && (Serial.available()>0))
                           {
                           char ch2 = Serial.read();                  // 8
+                          
                           char ch3 = Serial.read();                  // 0 or 1
-                          Serial.print("]");                         // verify back
+                          Serial.print("]");                         // verify back (debug pnly)
                           Serial.print(ch2);
                           Serial.println(ch3);
-                          
+                          wdt_reset();
                           switch(ch3)
                              {
                              case '0':
-                               if (AC_status) AC_status = 0;
+                               AC_status = 0;
                                break;
                               case '1':
-                               if (!AC_status) AC_status = 1;
+                               AC_status = 1;
                                break;
                              }
                               
                             soft_flush();
-                            verify.state = IDLE;
+                            verify.state = IDLE;    // only go to idle when we get a proper response
                           }
                        else
                           {
@@ -182,7 +200,10 @@ void loop() {
                           }
                   
                   }
-               break;
+                  break;
+               default:
+                  wdt_reset();
+                  break;
                }
            }  // end verify state machine processor
            
@@ -199,8 +220,9 @@ void loop() {
              irsend.sendRaw(rawCodes, codeLen, 38);
              wdt_reset();
              digitalWrite(pwmPin, HIGH);    // important!!!!!  This idles the LED's
-             delay(3*1000);  // wait 3 seconds (* 1000 milliseconds)
+             delay(2*1000);  // wait 3 seconds (* 1000 milliseconds)
              wdt_reset();
+             delay(1*1000);
              //Serial.println("Resume looop");
               pinMode(buttonPin, INPUT);      // set the pushbutton pin to input
              digitalWrite(buttonPin, HIGH);  // pullup on
@@ -250,6 +272,7 @@ float get_temperature()
 // Toggle the AC on or off
 void toggle_AC(void)
 {
+             Serial.println("$8");    // this indicates IR toggle over the air
              irsend.sendRaw(rawCodes, codeLen, 38);
              wdt_reset();
              delay(5);
@@ -280,7 +303,7 @@ void soft_flush(void)
    while (Serial.available()>0)
                      {
                       chx = Serial.read();
-                      
+                      wdt_reset();
                      }
             
 }

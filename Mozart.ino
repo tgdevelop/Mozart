@@ -14,6 +14,7 @@ OneWire  ds(5);               // One Wire on pin 5
 #define ledPin 8              // heartbeat LED
 #define TARGET_TEMP 80        // temperature setpoint
 #define TMRDOG   30           // watchdog type resp/ack timer
+#define INVALID 2             // define a bad response
 // the following defines are the state machine
 #define IDLE 0
 #define REQ 5
@@ -72,7 +73,7 @@ void setup() {
         digitalWrite(pwmPin, HIGH);       // idle the LED's
         pinMode(statusPin, OUTPUT);       // AC status pin led
         digitalWrite(statusPin, LOW);       // AC initially off
-        wdt_enable(WDTO_4S);              // watchdog set to 4 seconds
+        wdt_enable(WDTO_2S);              // watchdog set to 4 seconds
         roomTempF = 75;                   // initialize temp to turn off value
         AC_status = 0;
         ping = 0;                         // init the temperature reading control
@@ -84,7 +85,7 @@ void setup() {
 
 
 void loop() {
-        
+
           uint8_t i, val;
           wdt_reset();
 
@@ -102,7 +103,7 @@ void loop() {
               if (tmr2) tmr2--;
               if (tmr3) tmr3--;
              }
-             
+
          //************************************
         // Periodically read the sensors every tmr0 seconds (currently 5 secs)
         if (!tmr0)
@@ -115,17 +116,21 @@ void loop() {
         	{
         		//Serial.print("*");
         		val = quick_status();
-        		if ((val != AC_status) && (val !=2)) Serial.println("synch error");
-                		
-        		if (val==2) Serial.println("unknown");
+        		if ((val != AC_status) && (val !=2))
+                           {
+                            Serial.println("Synch error");
+                            val = quick_status();                   // try again to be sure
+                            if (val != INVALID) AC_status = val;    // if still out of synch, change AC_status
+                            }
+        		if (val==INVALID) Serial.println("Invalid");
 
         		tmr2 = TMRDOG;
         	}
-        
+
        // *********************************************************************
        // activate the AC control IR LED's if we're above the target temperature
        // turn the A/C unit on, load time delay and a request
-       if ((roomTempF > (TARGET_TEMP+0.5)) && (AC_status == 0))
+       if ((roomTempF > (TARGET_TEMP+0.7)) && (AC_status == 0))
            {
              // toggle the AC if we're not waiting for a verify
              if (verify.state == IDLE)
@@ -141,7 +146,7 @@ void loop() {
            }
 
        // deactivate the AC control by sending the IR codes, set the AC_status variable to off
-         if ((roomTempF < (TARGET_TEMP - 0.5)) && (AC_status == 1))
+         if ((roomTempF < (TARGET_TEMP - 1.0)) && (AC_status == 1))
            {
              // toggle the AC if we're not waiting for a verify
              if (verify.state == IDLE)
@@ -263,20 +268,21 @@ void soft_flush(void)
 uint8_t quick_status(void)
 {
   char ch;
-  unsigned long previousMillis,currentMillis;
-  uint8_t retval = 2;
+  unsigned long prevrespMillis,currrespMillis;
+  uint8_t retval = INVALID;     // init to invalid state, set this valid later when a valid state is returned
   Serial.println("?8");
-  currentMillis = millis();
-  previousMillis = currentMillis;
-  while(currentMillis - previousMillis < 2500) 
+  currrespMillis = millis();
+  prevrespMillis = currrespMillis;
+  while(currrespMillis - prevrespMillis < 2500)
          {
-         if (Serial.available()>2) break;
-         previousMillis = currentMillis;
-         currentMillis = millis();
+         if (Serial.available()>2) break;     // a correct response has at least 3 characters
+         // prevrespMillis = currrespMillis;
+         currrespMillis = millis();
+         wdt_reset();
          }
-  
-        
-  if (Serial.available()>2)
+
+
+  if (Serial.available()>2)          // if at least 3 characters, read the buffer
         {
          ch2 = Serial.read();
          delay(1);
@@ -284,11 +290,12 @@ uint8_t quick_status(void)
          delay(1);
          ch3 = Serial.read();
          if (ch3 == '0') retval = 0;
-         if (ch3 == '1') retval = 1;         
+         if (ch3 == '1') retval = 1;
+         wdt_reset();
          print_response();
         }
-        if (Serial.available()) soft_flush();
-        return retval;
+        if (Serial.available()) soft_flush();    // if the buffer still has chars, flush it
+        return retval;                           // return what we got above, either INVALID or a good value
 }
 
 void print_response(void)
@@ -296,6 +303,7 @@ void print_response(void)
        Serial.print("]");                         // verify back (debug pnly)
        Serial.print(ch2);
        Serial.println(ch3);
+       wdt_reset();
 }
 
 // Do the ds1820 temperature reading dance
@@ -331,8 +339,8 @@ switch (verify.state)
               case REQ:
 
                   verify.retry = 5;                  // set the retry count
-                  tmr1 = verify.pwrdly;             // set the request delayed read timer with desired time
-                  tmr2 = 255;                       // essentially turn this thing off until we settle
+                  tmr1 = verify.pwrdly;              // set the request delayed read timer with desired time
+                  tmr2 = 255;                        // essentially turn the watchdog off until we settle
                   verify.state = WAIT;
                   wdt_reset();
                   break;
@@ -342,39 +350,43 @@ switch (verify.state)
 
                          if (!tmr1)                      // wait indicated seconds for response request
                             {
-                            // Serial.println("?8");
-                            // tmr1 = 3;    // set the timer for the response
                             verify.state = RXSER;
                             }
                   break;
               case RXSER:
 
                   wdt_reset();
+                  /*
                   if (!tmr1)   // timeout if no response
                                  {
                                  verify.state = REQ;                   // retry until response
                                  verify.retry = 1;                     // with no power on/off delay
                                  soft_flush();
                                  }
+                                 */
                   while (verify.retry > 0)
                       {
                        retstat = quick_status();
-                        
-                       if (retstat != 2)
+                       wdt_reset();
+                       if (retstat != INVALID)
                           {
                           if (retstat == verify.mode)
                               {
-                                AC_status = retstat;
-                                verify.state = IDLE;    // only go to idle when we get a proper response
-                                tmr2 = TMRDOG;          // set up the monitor
-                                break;
+                                AC_status = retstat;       // only change status when we get the desired mode back
+                                // verify.state = IDLE;    // only go to idle when we get a proper response
+                                // tmr2 = TMRDOG;          // restore  the watchdog monitor
+                                verify.retry = 0;
                               }
                           }
-                          else 
+                          else   // keep looping until we get a response that's valid
+                             {
+                              Serial.println("Retry");
                              (verify.retry--);
+                             }
                       }
-                      
-                  verify.state = IDLE;    // only go to idle when we get a proper response or time out
+                  wdt_reset();
+                  verify.state = IDLE;    // go to idle when we get a proper response or time out
+                  tmr2 = TMRDOG;          // restore  the watchdog monitor
                   break;
                default:
                   wdt_reset();
